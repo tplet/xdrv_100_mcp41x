@@ -26,7 +26,6 @@
 #endif
 
 
-#include "tasmota.h"
 #ifdef USE_SPI
   #include <SPI.h>
 #endif
