@@ -281,6 +281,32 @@ static void Cmnd_MCP41CS() {
              (int)mcp41_cs_override, (int)mcp41_cs_gpio, mcp41_use_sspi ? "SSPI" : "SPI");
 }
 
+#ifdef USE_WEBSERVER
+
+// --- Option 1 : ligne d’état dans la page principale -----------------
+static void MCP41_WebSensor() {
+  // Affiche: MCP41 Wiper | 128 (SPI, CS=5)
+  WSContentSend_P(PSTR("{s}MCP41 Wiper{m}%u (%s, CS=%d){e}"),
+                  (unsigned)mcp41_last_value,
+                  mcp41_use_sspi ? "SSPI" : (mcp41_cs_gpio >= 0 ? "SPI" : "unset"),
+                  (int)mcp41_cs_gpio);
+}
+
+// --- Option 2 : boutons rapides (0 / 50 / 100 %) ---------------------
+static void MCP41_WebButtons() {
+  // Liens WebUI -> commandes (espace encodé %20 ; % doublé pour printf)
+  WSContentSend_P(PSTR(
+    "<div style='padding:4px 0'>"
+      "<a class='button bgrn' href='cm?cmnd=MCP41%%200'>0%%</a> "
+      "<a class='button bgrn' href='cm?cmnd=MCP41%%20128'>50%%</a> "
+      "<a class='button bgrn' href='cm?cmnd=MCP41%%20255'>100%%</a>"
+    "</div>"
+  ));
+}
+
+#endif  // USE_WEBSERVER
+
+
 // Table & dispatch
 static const char kMCP41Commands[] PROGMEM = "MCP41|MCP41GET|MCP41CS";
 void (* const MCP41Command[])(void) PROGMEM = { Cmnd_MCP41, Cmnd_MCP41GET, Cmnd_MCP41CS };
@@ -306,6 +332,16 @@ bool Xdrv100(uint8_t function) {
     case FUNC_COMMAND:
       handled = MCP41_CommandDispatcher();
       break;
+
+#ifdef USE_WEBSERVER
+    case FUNC_WEB_SENSOR:
+      MCP41_WebSensor();
+      break;
+
+    case FUNC_WEB_ADD_BUTTON:
+      MCP41_WebButtons();
+      break;
+#endif
 
     default:
       break;
