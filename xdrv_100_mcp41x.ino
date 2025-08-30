@@ -108,7 +108,7 @@ static void MCP41_DetectPinsFromConfig() {
     if (PinUsed(GPIO_SSPI_MOSI)) mcp41_sspi_mosi = (int8_t)Pin(GPIO_SSPI_MOSI);
     if (PinUsed(GPIO_SSPI_MISO)) mcp41_sspi_miso = (int8_t)Pin(GPIO_SSPI_MISO);
   } else {
-    if (PinUsed(GPIO_SPI_SCLK))  mcp41_spi_clk   = (int8_t)Pin(GPIO_SPI_SCLK);
+    if (PinUsed(GPIO_SPI_CLK))  mcp41_spi_clk   = (int8_t)Pin(GPIO_SPI_CLK);
     if (PinUsed(GPIO_SPI_MOSI))  mcp41_spi_mosi  = (int8_t)Pin(GPIO_SPI_MOSI);
     if (PinUsed(GPIO_SPI_MISO))  mcp41_spi_miso  = (int8_t)Pin(GPIO_SPI_MISO);
   }
@@ -311,12 +311,12 @@ static const char kMCP41Commands[] PROGMEM = "MCP41|MCP41GET|MCP41CS";
 void (* const MCP41Command[])(void) PROGMEM = { Cmnd_MCP41, Cmnd_MCP41GET, Cmnd_MCP41CS };
 
 static bool MCP41_CommandDispatcher() {
-  return CommandMatcher(kMCP41Commands, MCP41Command);
+  return DecodeCommand(kMCP41Commands, MCP41Command);
 }
 
 // ------------------------------ Entry point ---------------------------------
 
-bool Xdrv100(uint8_t function) {
+bool Xdrv100(uint32_t function) {
   bool handled = false;
 
   switch (function) {
