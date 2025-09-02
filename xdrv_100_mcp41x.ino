@@ -5,14 +5,12 @@
     - Bus SPI matériel (rôles: SPI CLK/MOSI/MISO/CS) ou SoftSPI (rôles: SSPI CLK/MOSI/MISO/CS).
     - Priorité : override MCP41CS > SSPI CS > SPI CS.
     - Commandes :
-        * MCP41 <0..100>  : écrit le wiper en pourcentage. Sans argument => renvoie la dernière valeur & info bus.
-        * MCP41GET        : alias pour lire la dernière valeur, en pourcentage.
-        * MCP41CS <gpio>  : override CS à chaud ; -1 => retour à la config SPI/SSPI.
+        * MCP41 <0.0..100.0>       : écrit le wiper en pourcentage. Sans argument => renvoie la dernière valeur & info bus.
+        * MCP41GET                 : alias pour lire la dernière valeur, en pourcentage.
+        * MCP41CS <gpio>           : override CS à chaud ; -1 => retour à la config SPI/SSPI.
+        * MCP41RAW_MIN <0..255>    : valeur minimale du wiper, en valeur brute (0 par défaut).
+        * MCP41RAW_MAX <0..255>    : valeur maximale du wiper, en valeur brute (255 par défaut).
     - Persistance : dernière valeur rejouée au boot via Rule (Rule3 par défaut).
-
-  A ajuster :
-    - MCP41_CMD_WRITE_WIPER : vérifie l’opcode d’écriture de TON MCP41xxx (datasheet).
-    - MCP41_SPI_CLOCK/MODE et MCP41_SSPI_DELAY_US si besoin.
 
   Prérequis :
     - Build avec USE_MCP41X
@@ -74,6 +72,8 @@ static int8_t   mcp41_cs_gpio        = -1;    // CS effectif (override ou config
 static int8_t   mcp41_cs_override    = -1;    // -1 => pas d’override
 static bool     mcp41_spi_inited     = false;
 static float    mcp41_last_value     = 0.0f; // en pourcentage
+static uint8_t  mcp41_raw_min        = MCP41_SPI_MIN_VALUE; // en valeur brute
+static uint8_t  mcp41_raw_max        = MCP41_SPI_MAX_VALUE; // en valeur brute
 
 static bool     mcp41_use_sspi       = false; // true=SoftSPI, false=SPI matériel
 // Broches SoftSPI
@@ -245,7 +245,12 @@ static void SSPI_TransferByte(uint8_t data) {
  * @return Valeur en pourcentage
  */
 float MCP41_ConvertToPercent(uint8_t value) {
-  return (float)value / (float)MCP41_SPI_MAX_VALUE * 100.0f;
+  if (value < mcp41_raw_min) {
+    return 0.0f;
+  } else if (value > mcp41_raw_max) {
+    return 100.0f;
+  }
+  return (float)(value - mcp41_raw_min) / (float)(mcp41_raw_max - mcp41_raw_min) * 100.0f;
 }
 
 /**
@@ -254,7 +259,12 @@ float MCP41_ConvertToPercent(uint8_t value) {
  * @return Valeur en pourcentage
  */
 uint8_t MCP41_ConvertToValue(float percent) {
-  return (uint8_t)(percent * (float)MCP41_SPI_MAX_VALUE / 100.0f);
+  if (percent < 0.0f) {
+    return mcp41_raw_min;
+  } else if (percent > 100.0f) {
+    return mcp41_raw_max;
+  }
+  return (uint8_t)(percent * (float)(mcp41_raw_max - mcp41_raw_min) / 100.0f) + mcp41_raw_min;
 }
 
 // ------------------------------ Écriture MCP41 ------------------------------
