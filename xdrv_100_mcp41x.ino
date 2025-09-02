@@ -5,8 +5,8 @@
     - Bus SPI matériel (rôles: SPI CLK/MOSI/MISO/CS) ou SoftSPI (rôles: SSPI CLK/MOSI/MISO/CS).
     - Priorité : override MCP41CS > SSPI CS > SPI CS.
     - Commandes :
-        * MCP41 <0..255>  : écrit le wiper. Sans argument => renvoie la dernière valeur & info bus.
-        * MCP41GET        : alias pour lire la dernière valeur.
+        * MCP41 <0..100>  : écrit le wiper en pourcentage. Sans argument => renvoie la dernière valeur & info bus.
+        * MCP41GET        : alias pour lire la dernière valeur, en pourcentage.
         * MCP41CS <gpio>  : override CS à chaud ; -1 => retour à la config SPI/SSPI.
     - Persistance : dernière valeur rejouée au boot via Rule (Rule3 par défaut).
 
@@ -58,12 +58,22 @@
   #define MCP41_RULE_SLOT        3           // Rule1..Rule3
 #endif
 
+// Valeur maximale du wiper
+#ifndef MCP41_SPI_MAX_VALUE
+  #define MCP41_SPI_MAX_VALUE        255
+#endif
+// Valeur minimale du wiper
+#ifndef MCP41_SPI_MIN_VALUE
+  #define MCP41_SPI_MIN_VALUE        0
+#endif
+
+
 // ------------------------------ État du driver ------------------------------
 
 static int8_t   mcp41_cs_gpio        = -1;    // CS effectif (override ou config)
 static int8_t   mcp41_cs_override    = -1;    // -1 => pas d’override
 static bool     mcp41_spi_inited     = false;
-static uint8_t  mcp41_last_value     = 0;
+static float    mcp41_last_value     = 0.0f; // en pourcentage
 
 static bool     mcp41_use_sspi       = false; // true=SoftSPI, false=SPI matériel
 // Broches SoftSPI
@@ -229,15 +239,40 @@ static void SSPI_TransferByte(uint8_t data) {
   }
 }
 
+/**
+ * @brief Convertit une valeur en pourcentage
+ * @param value Valeur à convertir
+ * @return Valeur en pourcentage
+ */
+float MCP41_ConvertToPercent(uint8_t value) {
+  return (float)value / (float)MCP41_SPI_MAX_VALUE * 100.0f;
+}
+
+/**
+ * @brief Convertit une valeur en pourcentage
+ * @param percent Valeur à convertir
+ * @return Valeur en pourcentage
+ */
+uint8_t MCP41_ConvertToValue(float percent) {
+  return (uint8_t)(percent * (float)MCP41_SPI_MAX_VALUE / 100.0f);
+}
+
 // ------------------------------ Écriture MCP41 ------------------------------
 
-static bool MCP41_Write(uint8_t value) {
+/**
+ * @brief Écrit une valeur dans le MCP41
+ * @param value Valeur à écrire, en pourcentage
+ * @return true si l'écriture a réussi, false sinon
+ */
+static bool MCP41_Write(float percent) {
   if (mcp41_cs_gpio < 0) { AddLog(LOG_LEVEL_ERROR, PSTR(LOG_TAG ": CS indisponible")); return false; }
   if (!mcp41_spi_inited) MCP41_InitSpiIfNeeded();
   if (!mcp41_spi_inited) return false;
 
+  uint8_t value = MCP41_ConvertToValue(percent);
+
   // Debug: afficher les données à transmettre
-  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Writing value %d (0x%02X) via %s"), value, value, mcp41_use_sspi ? "SSPI" : "SPI");
+  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Writing value %d (0x%02X, percent %d%%) via %s"), value, value, percent, mcp41_use_sspi ? "SSPI" : "SPI");
   AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Opcode: 0x%02X, Data: 0x%02X"), MCP41_CMD_WRITE_WIPER, value);
 
   if (mcp41_use_sspi) {
@@ -262,38 +297,39 @@ static bool MCP41_Write(uint8_t value) {
     SPI.endTransaction();
   }
 
-  mcp41_last_value = value;
-  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Write completed, last_value = %d"), mcp41_last_value);
+  mcp41_last_value = percent;
+  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Write completed, last_value = %f%%"), mcp41_last_value);
   return true;
 }
 
 // ------------------------------ Persistance (Rule) --------------------------
 
-static void MCP41_UpdateBootRule(uint8_t value) {
+static void MCP41_UpdateBootRule(float value) {
   // RuleX on System#Boot do MCP41 <value> endon ; RuleX 1
   char cmnd[96];
-  snprintf_P(cmnd, sizeof(cmnd), PSTR("Rule%d on System#Boot do MCP41 %u endon"), MCP41_RULE_SLOT, (unsigned)value);
+  snprintf_P(cmnd, sizeof(cmnd), PSTR("Rule%d on System#Boot do MCP41 %f%% endon"), MCP41_RULE_SLOT, value);
   ExecuteCommand(cmnd, SRC_IGNORE);
 
   snprintf_P(cmnd, sizeof(cmnd), PSTR("Rule%d 1"), MCP41_RULE_SLOT);
   ExecuteCommand(cmnd, SRC_IGNORE);
 
-  AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Boot rule set (Rule%d -> MCP41 %u)"), MCP41_RULE_SLOT, (unsigned)value);
+  AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Boot rule set (Rule%d -> MCP41 %f%%)"), MCP41_RULE_SLOT, value);
 }
 
 // ------------------------------ Commandes console ---------------------------
 
 static void Cmnd_MCP41() {
   if (XdrvMailbox.data_len == 0) {
-    Response_P(PSTR("{\"MCP41\":{\"last\":%u,\"cs\":%d,\"bus\":\"%s\"}}"),
-               (unsigned)mcp41_last_value,
+    Response_P(PSTR("{\"MCP41\":{\"last\":%f%%,\"cs\":%d,\"bus\":\"%s\"}}"),
+               mcp41_last_value,
                (int)mcp41_cs_gpio,
                mcp41_use_sspi ? "SSPI" : (mcp41_cs_gpio >= 0 ? "SPI" : "unset"));
     return;
   }
 
-  uint32_t val = XdrvMailbox.payload;
-  if (val > 255) val = 255;
+  float val = CharToFloat(XdrvMailbox.data);
+  if (val > 100.0f) val = 100.0f;
+  if (val < 0.0f) val = 0.0f;
 
   MCP41_InitSpiIfNeeded();
   if (mcp41_cs_gpio < 0) {
@@ -301,17 +337,17 @@ static void Cmnd_MCP41() {
     return;
   }
 
-  bool ok = MCP41_Write((uint8_t)val);
+  bool ok = MCP41_Write(val);
   if (ok) {
-    MCP41_UpdateBootRule((uint8_t)val);
-    Response_P(PSTR("{\"MCP41\":%u}"), (unsigned)val);
+    MCP41_UpdateBootRule(val);
+    Response_P(PSTR("{\"MCP41\":%f%%}"), val);
   } else {
     Response_P(PSTR("{\"MCP41\":\"error\"}"));
   }
 }
 
 static void Cmnd_MCP41GET() {
-  Response_P(PSTR("{\"MCP41\":{\"last\":%u}}"), (unsigned)mcp41_last_value);
+  Response_P(PSTR("{\"MCP41\":{\"last\":%f%%}}"), mcp41_last_value);
 }
 
 static void Cmnd_MCP41CS() {
@@ -340,8 +376,8 @@ static void Cmnd_MCP41CS() {
 // --- Ligne d’état dans la page principale -----------------
 static void MCP41_WebSensor() {
   // Affiche: MCP41 Wiper | 128 (SPI, CS=5)
-  WSContentSend_P(PSTR("{s}MCP41 Wiper{m}%u (%s, CS=%d){e}"),
-                  (unsigned)mcp41_last_value,
+  WSContentSend_P(PSTR("{s}MCP41 Wiper{m}%f%% (%s, CS=%d){e}"),
+                  mcp41_last_value,
                   mcp41_use_sspi ? "SSPI" : (mcp41_cs_gpio >= 0 ? "SPI" : "unset"),
                   (int)mcp41_cs_gpio);
 }
@@ -352,8 +388,8 @@ static void MCP41_WebButtons() {
   WSContentSend_P(PSTR(
     "<div style='text-align: center;'>"
       "<button name='mcp41_0' style='background: var(--c_btn);' onclick=\"fetch('cm?cmnd=MCP41%%200');\">0%%</button> "
-      "<button name='mcp41_50' style='background: var(--c_btn);' onclick=\"fetch('cm?cmnd=MCP41%%20128');\">50%%</button> "
-      "<button name='mcp41_100' style='background: var(--c_btn);' onclick=\"fetch('cm?cmnd=MCP41%%20255');\">100%%</button> "
+      "<button name='mcp41_50' style='background: var(--c_btn);' onclick=\"fetch('cm?cmnd=MCP41%%2050');\">50%%</button> "
+      "<button name='mcp41_100' style='background: var(--c_btn);' onclick=\"fetch('cm?cmnd=MCP41%%20100');\">100%%</button> "
     "</div>"
   ));
 }
@@ -365,7 +401,7 @@ static void MCP41_WebButtons() {
 static const char kMCP41Commands[] PROGMEM = "|GET|CS";
 
 enum MCP41_Commands {                                // commands useable in console or rules
-  CMND_MCP41,                                        // MCP41 <0..255> - écrire le wiper
+  CMND_MCP41,                                        // MCP41 <0.0..100.0> - écrire le wiper
   CMND_MCP41GET,                                     // MCP41GET - lire la dernière valeur
   CMND_MCP41CS                                       // MCP41CS <gpio> - override CS
 };
