@@ -10,6 +10,7 @@
         * MCP41CS <gpio>           : override CS à chaud ; -1 => retour à la config SPI/SSPI.
         * MCP41RAW_MIN <0..255>    : valeur minimale du wiper, en valeur brute (0 par défaut).
         * MCP41RAW_MAX <0..255>    : valeur maximale du wiper, en valeur brute (255 par défaut).
+        * MCP41INIT                : initialise les valeurs à partir des valeurs en mémoire.
     - Persistance : dernière valeur rejouée au boot via Rule (Rule3 par défaut).
 
   Prérequis :
@@ -27,6 +28,8 @@
 #ifdef USE_SPI
   #include <SPI.h>
 #endif
+#include <Arduino.h>
+#include <ArduinoJson.h>
 
 // ------------------------------ Configuration ------------------------------
 
@@ -57,14 +60,24 @@
 #endif
 
 // Valeur maximale du wiper
-#ifndef MCP41_SPI_MAX_VALUE
-  #define MCP41_SPI_MAX_VALUE        255
+#ifndef MCP41_RAW_MAX_VALUE
+  #define MCP41_RAW_MAX_VALUE        255
 #endif
 // Valeur minimale du wiper
-#ifndef MCP41_SPI_MIN_VALUE
-  #define MCP41_SPI_MIN_VALUE        0
+#ifndef MCP41_RAW_MIN_VALUE
+  #define MCP41_RAW_MIN_VALUE        0
 #endif
 
+// Memory slots
+#ifndef MCP41_MEM_SLOT_VALUE
+  #define MCP41_MEM_SLOT_VALUE          1           // Memory slot for current value
+#endif
+#ifndef MCP41_MEM_SLOT_MIN_RAW
+  #define MCP41_MEM_SLOT_MIN_RAW        2           // Memory slot for min raw
+#endif
+#ifndef MCP41_MEM_SLOT_MAX_RAW
+  #define MCP41_MEM_SLOT_MAX_RAW        3           // Memory slot for max raw
+#endif
 
 // ------------------------------ État du driver ------------------------------
 
@@ -72,8 +85,8 @@ static int8_t   mcp41_cs_gpio        = -1;    // CS effectif (override ou config
 static int8_t   mcp41_cs_override    = -1;    // -1 => pas d’override
 static bool     mcp41_spi_inited     = false;
 static float    mcp41_last_value     = 0.0f; // en pourcentage
-static uint8_t  mcp41_raw_min        = MCP41_SPI_MIN_VALUE; // en valeur brute
-static uint8_t  mcp41_raw_max        = MCP41_SPI_MAX_VALUE; // en valeur brute
+static uint8_t  mcp41_raw_min        = MCP41_RAW_MIN_VALUE; // en valeur brute
+static uint8_t  mcp41_raw_max        = MCP41_RAW_MAX_VALUE; // en valeur brute
 
 static bool     mcp41_use_sspi       = false; // true=SoftSPI, false=SPI matériel
 // Broches SoftSPI
@@ -179,6 +192,88 @@ static void MCP41_ResolveBusAndPins() {
     }
   }
 }
+
+// ------------------------------ Init ----------------------------------------
+
+static void MCP41_Init() {
+    // Init SPI/SoftSPI
+    MCP41_InitSpiIfNeeded();
+
+    // Retrieve value from memory
+    float v = MCP41_ReadFloatMemory(MCP41_MEM_SLOT_VALUE);
+    if (!isnan(v)) {
+      mcp41_last_value = v;
+      AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Value read from memory = %f"), mcp41_last_value);
+    }
+
+    // Retrieve raw min from memory
+    uint8_t rmin = MCP41_ReadUByteMemory(MCP41_MEM_SLOT_MIN_RAW);
+    if (!isnan(rmin)) {
+      mcp41_raw_min = rmin;
+      AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Raw min read from memory = %d"), mcp41_raw_min);
+    }
+
+    // Retrieve raw max from memory
+    uint8_t rmax = MCP41_ReadUByteMemory(MCP41_MEM_SLOT_MAX_RAW);
+    if (!isnan(rmax)) {
+      mcp41_raw_max = rmax;
+      AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Raw max read from memory = %d"), mcp41_raw_max);
+    }
+}
+
+
+/**
+ * @brief Read json part value from memory slot
+ */
+static JsonVariant MCP41_ReadMemJsonVariant(uint8_t slot) {
+  ResponseClear();
+
+  // Execute command to read memory
+  char cmnd[16];
+  snprintf_P(cmnd, sizeof(cmnd), PSTR("Mem%d"), slot);
+  ExecuteCommand(cmnd, SRC_IGNORE);
+
+  // Read response
+  const char* json = ResponseData();
+
+  // Parse response to json
+  StaticJsonDocument<128> doc;
+  DeserializationError err = deserializeJson(doc, json);
+  if (err) { return nullptr; }
+
+  // Get value
+  char key[8];
+  snprintf(key, sizeof(key), "Mem%u", slot);
+
+  return doc[key];
+}
+
+/**
+ * @brief Read float from memory slot
+ */
+static float MCP41_ReadFloatMemory(uint8_t slot) {
+  JsonVariant v = MCP41_ReadMemJsonVariant(slot);
+
+  if (v.is<float>()) { 
+    return v.as<float>();
+  } else {
+    return NAN;
+  }
+}
+
+/**
+ * @brief Read uint8_t from memory slot
+ */
+static uint8_t MCP41_ReadUByteMemory(uint8_t slot) {
+  JsonVariant v = MCP41_ReadMemJsonVariant(slot);
+
+  if (v.is<uint8_t>()) { 
+    return v.as<uint8_t>();
+  } else {
+    return NAN;
+  }
+}
+
 
 // ------------------------------ Init SPI / SoftSPI --------------------------
 
@@ -308,29 +403,65 @@ static bool MCP41_Write(float percent) {
   }
 
   mcp41_last_value = percent;
-  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Write completed, last_value = %f%%"), mcp41_last_value);
+  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Write completed, last_value = %f"), mcp41_last_value);
   return true;
 }
 
 // ------------------------------ Persistance (Rule) --------------------------
 
-static void MCP41_UpdateBootRule(float value) {
+/**
+ * @brief Met à jour la règle de boot pour déclencher un init
+ */
+static void MCP41_UpdateBootRule() {
   // RuleX on System#Boot do MCP41 <value> endon ; RuleX 1
   char cmnd[96];
-  snprintf_P(cmnd, sizeof(cmnd), PSTR("Rule%d on System#Boot do MCP41 %f%% endon"), MCP41_RULE_SLOT, value);
+  snprintf_P(cmnd, sizeof(cmnd), PSTR("Rule%d on System#Boot do MCP41Init endon"), MCP41_RULE_SLOT);
   ExecuteCommand(cmnd, SRC_IGNORE);
 
   snprintf_P(cmnd, sizeof(cmnd), PSTR("Rule%d 1"), MCP41_RULE_SLOT);
   ExecuteCommand(cmnd, SRC_IGNORE);
 
-  AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Boot rule set (Rule%d -> MCP41 %f%%)"), MCP41_RULE_SLOT, value);
+  AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Boot rule set (Rule%d -> MCP41Init)"), MCP41_RULE_SLOT);
+}
+
+/**
+ * @brief Sauvegarde la valeur de pourcentage dans la mémoire
+ */
+static void MCP41_ValueToMemory(float value) {
+  chat cmnd[96];
+  snprintf_P(cmnd, sizeof(cmnd), PSTR("Mem%d %f"), MCP41_MEM_SLOT_VALUE, value);
+  ExecuteCommand(cmnd, SRC_IGNORE);
+
+  AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Value saved to memory (Mem%d -> %f)"), MCP41_MEM_SLOT_VALUE, value);
+}
+
+/**
+ * @brief Sauvegarde la valeur de raw minimale dans la mémoire
+ */
+static void MCP41_RawMinToMemory(uint8_t value) {
+  chat cmnd[96];
+  snprintf_P(cmnd, sizeof(cmnd), PSTR("Mem%d %d"), MCP41_MEM_SLOT_MIN_RAW, value);
+  ExecuteCommand(cmnd, SRC_IGNORE);
+
+  AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Raw min saved to memory (Mem%d -> %d)"), MCP41_MEM_SLOT_MIN_RAW, value);
+}
+
+/**
+ * @brief Sauvegarde la valeur de raw maximale dans la mémoire
+ */
+static void MCP41_RawMaxToMemory(uint8_t value) {
+  chat cmnd[96];
+  snprintf_P(cmnd, sizeof(cmnd), PSTR("Mem%d %d"), MCP41_MEM_SLOT_MAX_RAW, value);
+  ExecuteCommand(cmnd, SRC_IGNORE);
+
+  AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Raw max saved to memory (Mem%d -> %d)"), MCP41_MEM_SLOT_MAX_RAW, value);
 }
 
 // ------------------------------ Commandes console ---------------------------
 
 static void Cmnd_MCP41() {
   if (XdrvMailbox.data_len == 0) {
-    Response_P(PSTR("{\"MCP41\":{\"last\":%f%%,\"cs\":%d,\"bus\":\"%s\"}}"),
+    Response_P(PSTR("{\"MCP41\":{\"last\":%f,\"cs\":%d,\"bus\":\"%s\"}}"),
                mcp41_last_value,
                (int)mcp41_cs_gpio,
                mcp41_use_sspi ? "SSPI" : (mcp41_cs_gpio >= 0 ? "SPI" : "unset"));
@@ -338,8 +469,6 @@ static void Cmnd_MCP41() {
   }
 
   float val = CharToFloat(XdrvMailbox.data);
-  if (val > 100.0f) val = 100.0f;
-  if (val < 0.0f) val = 0.0f;
 
   MCP41_InitSpiIfNeeded();
   if (mcp41_cs_gpio < 0) {
@@ -349,15 +478,16 @@ static void Cmnd_MCP41() {
 
   bool ok = MCP41_Write(val);
   if (ok) {
-    MCP41_UpdateBootRule(val);
-    Response_P(PSTR("{\"MCP41\":%f%%}"), val);
+    // @TODO: Remove if useless
+    //MCP41_UpdateBootRule();
+    Response_P(PSTR("{\"MCP41\":%f}"), val);
   } else {
     Response_P(PSTR("{\"MCP41\":\"error\"}"));
   }
 }
 
 static void Cmnd_MCP41GET() {
-  Response_P(PSTR("{\"MCP41\":{\"last\":%f%%}}"), mcp41_last_value);
+  Response_P(PSTR("{\"MCP41\":{\"last\":%f}}"), mcp41_last_value);
 }
 
 static void Cmnd_MCP41CS() {
@@ -385,8 +515,8 @@ static void Cmnd_MCP41CS() {
 
 // --- Ligne d’état dans la page principale -----------------
 static void MCP41_WebSensor() {
-  // Affiche: MCP41 Wiper | 128 (SPI, CS=5)
-  WSContentSend_P(PSTR("{s}MCP41 Wiper{m}%f%% (%s, CS=%d){e}"),
+  // Affiche: MCP41 Wiper | 100 (SPI, CS=5)
+  WSContentSend_P(PSTR("{s}MCP41 Wiper{m}%f (%s, CS=%d){e}"),
                   mcp41_last_value,
                   mcp41_use_sspi ? "SSPI" : (mcp41_cs_gpio >= 0 ? "SPI" : "unset"),
                   (int)mcp41_cs_gpio);
@@ -408,15 +538,17 @@ static void MCP41_WebButtons() {
 
 
 // Table & dispatch
-static const char kMCP41Commands[] PROGMEM = "|GET|CS";
+static const char kMCP41Commands[] PROGMEM = "|GET|CS|RAW_MIN|RAW_MAX|INIT";
 
 enum MCP41_Commands {                                // commands useable in console or rules
   CMND_MCP41,                                        // MCP41 <0.0..100.0> - écrire le wiper
   CMND_MCP41GET,                                     // MCP41GET - lire la dernière valeur
-  CMND_MCP41CS                                       // MCP41CS <gpio> - override CS
+  CMND_MCP41CS,                                      // MCP41CS <gpio> - override CS
+  CMND_MCP41RAW_MIN,                                 // MCP41RAW_MIN <0..255> - valeur minimale du wiper
+  CMND_MCP41RAW_MAX                                  // MCP41RAW_MAX <0..255> - valeur maximale du wiper
 };
 
-void (* const MCP41Command[])(void) PROGMEM = { Cmnd_MCP41, Cmnd_MCP41GET, Cmnd_MCP41CS };
+void (* const MCP41Command[])(void) PROGMEM = { Cmnd_MCP41, Cmnd_MCP41GET, Cmnd_MCP41CS, Cmnd_MCP41RAW_MIN, Cmnd_MCP41RAW_MAX };
 
 static bool MCP41_CommandDispatcher() {
   char command[CMDSZ];
@@ -451,6 +583,21 @@ static bool MCP41_CommandDispatcher() {
         Cmnd_MCP41CS();
         break;
 
+      case CMND_MCP41RAW_MIN:  // MCP41RAW_MIN
+        AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Command MCP41RAW_MIN matched"));
+        //Cmnd_MCP41RAW_MIN();
+        break;
+
+      case CMND_MCP41RAW_MAX:  // MCP41RAW_MAX
+        AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Command MCP41RAW_MAX matched"));
+        //Cmnd_MCP41RAW_MAX();
+        break;
+
+      case CMND_MCP41INIT:  // MCP41INIT
+        AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Command MCP41INIT matched"));
+        //Cmnd_MCP41INIT();
+        break;
+
       default:
         // Unknown command
         AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Unknown command code %d"), command_code);
@@ -483,7 +630,7 @@ bool Xdrv100(uint32_t function) {
       break;
 
     case FUNC_INIT:
-      MCP41_InitSpiIfNeeded();
+      MCP41_Init();
       break;
 
     case FUNC_ACTIVE:
