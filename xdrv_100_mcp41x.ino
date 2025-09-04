@@ -280,7 +280,7 @@ static bool MCP41_Write(float percent) {
   uint8_t value = MCP41_ConvertToValue(percent);
 
   // Debug: afficher les données à transmettre
-  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Writing value %d (0x%02X, percent %d%%) via %s"), value, value, percent, mcp41_use_sspi ? "SSPI" : "SPI");
+  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Writing value %d (0x%02X, percent %f) via %s"), value, value, percent, mcp41_use_sspi ? "SSPI" : "SPI");
   AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Opcode: 0x%02X, Data: 0x%02X"), MCP41_CMD_WRITE_WIPER, value);
 
   if (mcp41_use_sspi) {
