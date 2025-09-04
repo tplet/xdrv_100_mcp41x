@@ -8,8 +8,6 @@
         * MCP41 <0.0..100.0>       : écrit le wiper en pourcentage. Sans argument => renvoie la dernière valeur & info bus.
         * MCP41GET                 : alias pour lire la dernière valeur, en pourcentage.
         * MCP41CS <gpio>           : override CS à chaud ; -1 => retour à la config SPI/SSPI.
-        * MCP41RAW_MIN <0..255>    : valeur minimale du wiper, en valeur brute (0 par défaut).
-        * MCP41RAW_MAX <0..255>    : valeur maximale du wiper, en valeur brute (255 par défaut).
     - Persistance : dernière valeur rejouée au boot via Rule (Rule3 par défaut).
 
   Prérequis :
@@ -308,7 +306,7 @@ static bool MCP41_Write(float percent) {
   }
 
   mcp41_last_value = percent;
-  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Write completed, last_value = %f%%"), mcp41_last_value);
+  AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Write completed, last_value = %f"), mcp41_last_value);
   return true;
 }
 
@@ -317,20 +315,20 @@ static bool MCP41_Write(float percent) {
 static void MCP41_UpdateBootRule(float value) {
   // RuleX on System#Boot do MCP41 <value> endon ; RuleX 1
   char cmnd[96];
-  snprintf_P(cmnd, sizeof(cmnd), PSTR("Rule%d on System#Boot do MCP41 %f%% endon"), MCP41_RULE_SLOT, value);
+  snprintf_P(cmnd, sizeof(cmnd), PSTR("Rule%d on System#Boot do MCP41 %f endon"), MCP41_RULE_SLOT, value);
   ExecuteCommand(cmnd, SRC_IGNORE);
 
   snprintf_P(cmnd, sizeof(cmnd), PSTR("Rule%d 1"), MCP41_RULE_SLOT);
   ExecuteCommand(cmnd, SRC_IGNORE);
 
-  AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Boot rule set (Rule%d -> MCP41 %f%%)"), MCP41_RULE_SLOT, value);
+  AddLog(LOG_LEVEL_INFO, PSTR(LOG_TAG ": Boot rule set (Rule%d -> MCP41 %f)"), MCP41_RULE_SLOT, value);
 }
 
 // ------------------------------ Commandes console ---------------------------
 
 static void Cmnd_MCP41() {
   if (XdrvMailbox.data_len == 0) {
-    Response_P(PSTR("{\"MCP41\":{\"last\":%f%%,\"cs\":%d,\"bus\":\"%s\"}}"),
+    Response_P(PSTR("{\"MCP41\":{\"last\":%f,\"cs\":%d,\"bus\":\"%s\"}}"),
                mcp41_last_value,
                (int)mcp41_cs_gpio,
                mcp41_use_sspi ? "SSPI" : (mcp41_cs_gpio >= 0 ? "SPI" : "unset"));
@@ -350,14 +348,14 @@ static void Cmnd_MCP41() {
   bool ok = MCP41_Write(val);
   if (ok) {
     MCP41_UpdateBootRule(val);
-    Response_P(PSTR("{\"MCP41\":%f%%}"), val);
+    Response_P(PSTR("{\"MCP41\":%f}"), val);
   } else {
     Response_P(PSTR("{\"MCP41\":\"error\"}"));
   }
 }
 
 static void Cmnd_MCP41GET() {
-  Response_P(PSTR("{\"MCP41\":{\"last\":%f%%}}"), mcp41_last_value);
+  Response_P(PSTR("{\"MCP41\":{\"last\":%f}}"), mcp41_last_value);
 }
 
 static void Cmnd_MCP41CS() {
@@ -386,7 +384,7 @@ static void Cmnd_MCP41CS() {
 // --- Ligne d’état dans la page principale -----------------
 static void MCP41_WebSensor() {
   // Affiche: MCP41 Wiper | 128 (SPI, CS=5)
-  WSContentSend_P(PSTR("{s}MCP41 Wiper{m}%f%% (%s, CS=%d){e}"),
+  WSContentSend_P(PSTR("{s}MCP41 Wiper{m}%f (%s, CS=%d){e}"),
                   mcp41_last_value,
                   mcp41_use_sspi ? "SSPI" : (mcp41_cs_gpio >= 0 ? "SPI" : "unset"),
                   (int)mcp41_cs_gpio);
