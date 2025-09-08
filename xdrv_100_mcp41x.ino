@@ -433,7 +433,7 @@ static void MCP41_WebButtons() {
 
 
 // Table & dispatch
-static const char kMCP41Commands[] PROGMEM = "|GET|CS";
+static const char kMCP41Commands[] PROGMEM = "|GET|CS|ADD";
 
 enum MCP41_Commands {                                // commands useable in console or rules
   CMND_MCP41,                                        // MCP41 <0.0..100.0> - écrire le wiper
