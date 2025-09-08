@@ -8,6 +8,7 @@
         * MCP41 <0.0..100.0>       : écrit le wiper en pourcentage. Sans argument => renvoie la dernière valeur & info bus.
         * MCP41GET                 : alias pour lire la dernière valeur, en pourcentage.
         * MCP41CS <gpio>           : override CS à chaud ; -1 => retour à la config SPI/SSPI.
+        * MCP41ADD <-100.0..100.0> : increase value (but result will cannot below 0.0 and up to 100.0)
     - Persistance : dernière valeur rejouée au boot via Rule (Rule3 par défaut).
 
   Prérequis :
@@ -310,6 +311,27 @@ static bool MCP41_Write(float percent) {
   return true;
 }
 
+/**
+ * Try to set value
+ */
+static bool MCP41_TrySetValue(float val) {
+  if (val > 100.0f) val = 100.0f;
+  if (val < 0.0f) val = 0.0f;
+
+  MCP41_InitSpiIfNeeded();
+  if (mcp41_cs_gpio < 0) {
+    Response_P(PSTR("{\"MCP41\":\"CS missing (set SPI/SSPI CS or use MCP41CS)\"}"));
+    return false;
+  }
+
+  bool ok = MCP41_Write(val);
+  if (ok) {
+    MCP41_UpdateBootRule(val);
+  }
+
+  return ok;
+}
+
 // ------------------------------ Persistance (Rule) --------------------------
 
 static void MCP41_UpdateBootRule(float value) {
@@ -335,27 +357,16 @@ static void Cmnd_MCP41() {
     return;
   }
 
-  float val = CharToFloat(XdrvMailbox.data);
-  if (val > 100.0f) val = 100.0f;
-  if (val < 0.0f) val = 0.0f;
-
-  MCP41_InitSpiIfNeeded();
-  if (mcp41_cs_gpio < 0) {
-    Response_P(PSTR("{\"MCP41\":\"CS missing (set SPI/SSPI CS or use MCP41CS)\"}"));
-    return;
-  }
-
-  bool ok = MCP41_Write(val);
-  if (ok) {
-    MCP41_UpdateBootRule(val);
-    Response_P(PSTR("{\"MCP41\":%f}"), val);
+  bool success = MCP41_TrySetValue(CharToFloat(XdrvMailbox.data));
+  if (success) {
+    Response_P(PSTR("{\"MCP41\":%f}"), mcp41_last_value);
   } else {
     Response_P(PSTR("{\"MCP41\":\"error\"}"));
   }
 }
 
 static void Cmnd_MCP41GET() {
-  Response_P(PSTR("{\"MCP41\":{\"last\":%f}}"), mcp41_last_value);
+  Response_P(PSTR("{\"MCP41\":%f}"), mcp41_last_value);
 }
 
 static void Cmnd_MCP41CS() {
@@ -377,6 +388,22 @@ static void Cmnd_MCP41CS() {
 
   Response_P(PSTR("{\"MCP41CS\":{\"override\":%d,\"effective\":%d,\"bus\":\"%s\"}}"),
              (int)mcp41_cs_override, (int)mcp41_cs_gpio, mcp41_use_sspi ? "SSPI" : "SPI");
+}
+
+static void Cmnd_MCP41ADD() {
+  if (XdrvMailbox.data_len == 0) {
+    Response_P(PSTR("{\"MCP41ADD\":\"Increment parameter missing! (-100.0 to 100.0)\"}"));
+    return;
+  }
+
+  float previous_value = mcp41_last_value;
+  float add = CharToFloat(XdrvMailbox.data);
+  bool success = MCP41_TrySetValue(mcp41_last_value + add);
+  if (success) {
+    Response_P(PSTR("{\"MCP41ADD\":{\"previous\":%f, \"add\":%f, \"value\":%f}}"), previous_value, add, mcp41_last_value);
+  } else {
+    Response_P(PSTR("{\"MCP41ADD\":\"error\"}"));
+  }
 }
 
 #ifdef USE_WEBSERVER
@@ -411,10 +438,11 @@ static const char kMCP41Commands[] PROGMEM = "|GET|CS";
 enum MCP41_Commands {                                // commands useable in console or rules
   CMND_MCP41,                                        // MCP41 <0.0..100.0> - écrire le wiper
   CMND_MCP41GET,                                     // MCP41GET - lire la dernière valeur
-  CMND_MCP41CS                                       // MCP41CS <gpio> - override CS
+  CMND_MCP41CS,                                      // MCP41CS <gpio> - override CS
+  CMND_MCP41ADD                                      // MCP41ADD <-100.0..100.0> - increase value (but result will cannot below 0.0 and up to 100.0)
 };
 
-void (* const MCP41Command[])(void) PROGMEM = { Cmnd_MCP41, Cmnd_MCP41GET, Cmnd_MCP41CS };
+void (* const MCP41Command[])(void) PROGMEM = { Cmnd_MCP41, Cmnd_MCP41GET, Cmnd_MCP41CS, Cmnd_MCP41ADD };
 
 static bool MCP41_CommandDispatcher() {
   char command[CMDSZ];
@@ -447,6 +475,11 @@ static bool MCP41_CommandDispatcher() {
       case CMND_MCP41CS:  // MCP41CS
         AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Command MCP41CS matched"));
         Cmnd_MCP41CS();
+        break;
+      
+      case CMND_MCP41ADD: // MCP41ADD
+        AddLog(LOG_LEVEL_DEBUG, PSTR(LOG_TAG ": Command MCP41ADD matched"));
+        Cmnd_MCP41ADD();
         break;
 
       default:
